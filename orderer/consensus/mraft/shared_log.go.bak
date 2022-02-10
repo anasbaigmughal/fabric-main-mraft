@@ -1,0 +1,378 @@
+package raft
+
+import (
+	"errors"
+	"fmt"
+	"strconv"
+	"sync"
+)
+
+type ErrRedirect int // See Log.Append. Implements Error interface.
+
+var MsgAckMap map[Lsn]int
+
+type Log struct {
+	sync.RWMutex
+	entries     []*LogEntryStruct
+	commitIndex Lsn
+	insertIndex Lsn
+}
+
+type LogStructInt interface {
+	//createNewLog() *Log
+	getCurrentIndex() Lsn
+}
+
+// create and return new log object
+
+func createNewLog() *Log {
+
+	entryObj := &Log{
+		entries:     []*LogEntryStruct{},
+		commitIndex: 0,
+		insertIndex: 0,
+	}
+	return entryObj
+}
+
+//Returns current log LSN
+func (EntryObj *Log) getCurrentIndex() Lsn {
+	EntryObj.RLock()
+	defer EntryObj.RUnlock()
+
+	if len(EntryObj.entries) == 0 {
+		return 0
+	}
+	return EntryObj.entries[len(EntryObj.entries)-1].Logsn
+}
+
+//Checks if log contains the entry with particular index and term.
+
+func (EntryObj *Log) containsEntry(index uint64, term int) bool {
+	entry := EntryObj.getEntry(index)
+	return (entry != nil && entry.TermIndex == term)
+}
+
+//get Log entry by index
+
+func (EntryObj *Log) getEntry(index uint64) *LogEntryStruct {
+	EntryObj.RLock()
+	defer EntryObj.RUnlock()
+
+	if index <= 0 || index > (uint64(len(EntryObj.entries))) {
+		return nil
+	}
+	return EntryObj.entries[index-1]
+}
+
+//Returns the entries after the given index
+func (EntryObj *Log) entriesAfter(index Lsn) ([]*LogEntryStruct, int) {
+	EntryObj.RLock()
+	defer EntryObj.RUnlock()
+
+	if index <= 0 {
+		return nil, 0
+	}
+
+	if debug {
+
+		fmt.Println("entriesAfter(): Last index %v , want to insert at %v ", EntryObj.insertIndex, uint64(index))
+	}
+
+	if index > EntryObj.insertIndex-1 {
+		panic(fmt.Sprintf("Raft: Log Index is beyond end of log: %v %v", (EntryObj.insertIndex - 1), index))
+	}
+
+	pos := Lsn(0)
+	lastTerm := int(0)
+	for ; pos < EntryObj.insertIndex-1; pos++ {
+		if EntryObj.entries[pos].Logsn > index {
+			break
+		}
+
+		lastTerm = EntryObj.entries[pos].TermIndex
+	}
+
+	result := EntryObj.entries[pos:]
+	if len(result) == 0 {
+		return []*LogEntryStruct{}, lastTerm
+	}
+
+	//if entries are less then max limit then return all entries
+	return result, lastTerm
+}
+
+//Return the last log entry term
+func (EntryObj *Log) getLastTerm() int {
+	EntryObj.RLock()
+	defer EntryObj.RUnlock()
+	if len(EntryObj.entries) <= 0 {
+		return 0
+	}
+	return EntryObj.entries[len(EntryObj.entries)-1].TermIndex
+}
+
+//Discards entries which are not commited
+func (EntryObj *Log) discardEntries(index uint64, term int) error {
+	EntryObj.Lock()
+	defer EntryObj.Unlock()
+
+//	fmt.Println("discard1 : ", index, term)
+
+	if index < 0 || index < uint64(EntryObj.commitIndex) {
+//fmt.Println("Returning........2")
+		return errors.New("Invalid Index")
+	}
+
+//fmt.Println("discard2 : ", index, term)
+	if index == 0 {
+		EntryObj.entries = []*LogEntryStruct{}
+//fmt.Println("Returning........1")
+
+		return nil
+	} else {
+	
+	//fmt.Println("discard4 : ", index, term)
+		// Do not discard if the entry at index does not have the matching term.
+		logEntry := EntryObj.entries[index]
+
+		if logEntry.TermIndex != term {
+	//		fmt.Println("Returning........3")
+			return errors.New("Discard failed. Term mismatch")
+		} else if logEntry.Committed() {
+	//	fmt.Println("Returning........4")
+			return errors.New("Discard failed. Entry already committed.")
+		} else {
+			EntryObj.entries = EntryObj.entries[:index]
+		}
+	}
+	//fmt.Println("discard3 : ", index, term)
+	//fmt.Println("Returning........5")
+	return nil
+}
+
+//Return latest commit index
+func (EntryObj *Log) getCommitIndex() Lsn {
+	EntryObj.RLock()
+	defer EntryObj.RUnlock()
+	return EntryObj.commitIndex
+}
+
+//Return lastlog entry index
+func (EntryObj *Log) lastIndex() Lsn {
+	EntryObj.RLock()
+	defer EntryObj.RUnlock()
+	if len(EntryObj.entries) <= 0 {
+		return 0
+	}
+	return EntryObj.entries[len(EntryObj.entries)-1].Logsn
+}
+
+// Appends a series of entries to the log.
+func (EntryObj *Log) appendEntries(entries []*LogEntryStruct) error {
+	EntryObj.Lock()
+	defer EntryObj.Unlock()
+
+	for i := range entries {
+		EntryObj.entries = EntryObj.appendAEntry(EntryObj.entries, entries[i])
+	}
+	return nil
+}
+
+func (EntryObj *Log) appendAEntry(entries []*LogEntryStruct, ent *LogEntryStruct) []*LogEntryStruct {
+	fmt.Println("YAha Tah",len(EntryObj.entries))
+	EntryObj.entries = append(EntryObj.entries,ent)
+	//EntryObj.entries[len(EntryObj.entries)] = ent
+	//EntryObj.entries = append(EntryObj.entries,ent)
+	fmt.Println("NOOOOOOYAha Tah",len(EntryObj.entries))
+	
+	return EntryObj.entries
+}
+
+// Append entry will append entry into log
+func (EntryObj *Log) appendEntry(entry *LogEntryStruct) error {
+	EntryObj.Lock()
+	defer EntryObj.Unlock()
+
+	if len(EntryObj.entries) > 0 {
+		if entry.TermIndex < EntryObj.getLastTerm() {
+			return errors.New("AppendEntry failed. Invalid term")
+		}
+		if entry.TermIndex == EntryObj.getLastTerm() && entry.Logsn <= EntryObj.lastIndex() {
+			return errors.New("AppendEntry failed. Invalid index")
+		}
+	}
+	//lastIndex(.entries = appendAEntry(lastIndex(.entries, entry)
+	fmt.Println("sdfh")
+	EntryObj.entries = EntryObj.appendAEntry(EntryObj.entries, entry)
+	return nil
+
+}
+
+//Update commit index
+func (EntryObj *Log) updateCommitIndex(index Lsn) {
+	EntryObj.Lock()
+	defer EntryObj.Unlock()
+	if index > EntryObj.commitIndex {
+		EntryObj.commitIndex = index
+	}
+
+}
+
+//Commit current log to given index
+func (EntryObj *Log) commitTill(commitIndex Lsn) error {
+	EntryObj.Lock()
+	defer EntryObj.Unlock()
+
+	if commitIndex > Lsn(len(EntryObj.entries)) {
+		commitIndex = Lsn(len(EntryObj.entries))
+	}
+	if commitIndex < EntryObj.commitIndex {
+		return nil
+	}
+	pos := EntryObj.commitIndex + 1
+	if pos < 0 {
+		panic("pending commit pos < 0")
+	}
+	for i := EntryObj.commitIndex + 1; i <= commitIndex; i++ {
+		entryIndex := i - 1
+		entry := EntryObj.entries[entryIndex]
+
+		// Update commit index.
+		EntryObj.commitIndex = entry.Logsn
+		entry.Commit = true
+	}
+
+	return nil
+}
+
+type SharedLog interface {
+	// Each data item is wrapped in a LogEntry with a unique
+	// lsn. The only error that will be returned is ErrRedirect,
+	// to indicate the server id of the leader. Append initiates
+	// a local disk write and a broadcast to the other replicas,
+	// and returns without waiting for the result.
+
+	ClusterComm()
+	Append(data []byte) (LogEntry, error)
+}
+
+//Envelop packs message along with server id and message id.
+/* MessageId denotes what type of message it is
+1 => Call need to be made AppendEntryRPC()
+2 => Message is ACK from Peers
+
+*/
+
+type Envelope struct {
+	Pid          int
+	SenderId     int
+	Leaderid     int
+	MessageId    int
+	CommitIndex  uint64
+	LastLogIndex uint64
+	LastLogTerm  int
+	//Message      LogEntryStruct
+	Message interface{}
+}
+
+type LogEntry interface {
+	Lsn() Lsn
+	Data() []byte
+	Term() int
+	Committed() bool
+}
+
+type LogEntryStruct struct {
+	Logsn     Lsn
+	TermIndex int
+	DataArray []byte
+	Commit    bool
+}
+
+func (les LogEntryStruct) Term() int {
+	return les.TermIndex
+}
+
+func (les LogEntryStruct) Lsn() Lsn {
+	return les.Logsn
+}
+
+func (les LogEntryStruct) Data() []byte {
+	return les.DataArray
+}
+
+func (les LogEntryStruct) Committed() bool {
+	return les.Commit
+}
+
+func (e ErrRedirect) Error() string {
+
+	return "Redirect to server " + strconv.Itoa(int(e)) + "\r\n"
+}
+
+func AppendEntriesRPC(Servid int, ServerVar *Raft) {
+
+	env := <-(ServerVar.Inbox())
+	env.Pid = env.SenderId
+	env.MessageId = CONFIRMCONSENSUS
+	env.SenderId = Servid
+	ServerVar.Outbox() <- env
+	//nil means everything was fine in append and it has done all the expected work.
+
+}
+
+//Append() Will first check if current server is leader, if not it'll return an error
+//else it'll broadcast to peers in cluster a request for consensus.
+
+func (ServerVar *Raft) Append(data []byte) (LogEntry, error) {
+
+	var LogEnt LogEntry
+
+	var err ErrRedirect
+	if ServerVar.GetState() != LEADER {
+		err = ErrRedirect(ServerVar.GetLeader())
+
+		fmt.Println("THis is not leader ", ServerVar.ServId())
+		fmt.Println("GetLeader  = ", ServerVar.GetLeader())
+		MutexAppend.Unlock()
+		//unlock the MutexAppend Call lock
+		return LogEnt, err
+	}
+
+	fmt.Println("THis seems leader ", ServerVar.ServId())
+	fmt.Println("GetLeader  = ", ServerVar.GetLeader())
+	fmt.Println("GetState  = ", ServerVar.GetState())
+
+	var les LogEntryStruct
+
+	(*ServerVar).LsnVar = (*ServerVar).LsnVar + 1
+	les.Logsn = Lsn((*ServerVar).LsnVar)
+	les.DataArray = data
+	les.TermIndex = ServerVar.GetTerm()
+	les.Commit = false
+
+	
+	var msg appendEntries
+	
+	msg.TermIndex = ServerVar.Term
+	
+	
+	msg.Entries = append(msg.Entries,&les)
+	
+	//fmt.Println("Server...........  2------",len(msg.Entries),msg.Entries[0].Logsn)
+	
+	var envVar Envelope
+	envVar.Pid = BROADCAST
+	envVar.MessageId = APPENDENTRIESRPC
+	envVar.SenderId = ServerVar.ServId()
+	envVar.LastLogIndex = ServerVar.GetPrevLogIndex()
+	envVar.LastLogTerm = ServerVar.GetPrevLogTerm()
+	envVar.Message = msg
+	MsgAckMap[les.Lsn()] = 0
+	ServerVar.Outbox() <- &envVar
+	//fmt.Println("Server...........  1")
+	
+	//nil means everything was fine in append and it has done all the expected work.
+	return les, nil
+}
