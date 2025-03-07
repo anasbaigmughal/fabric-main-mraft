@@ -1,6 +1,6 @@
 # A Study on the Adoption of Blockchain for IoT Devices in Supply Chain
 Computational Intelligence and Neuroscience Journal / 2022 / Article<br/>
-[Research Publication Link](https://doi.org/10.1155/2022/9228982)
+[Research Publication Link](https://onlinelibrary.wiley.com/doi/10.1155/2022/9228982)
 
 *Muhammad Anas Baig,<sup>1</sup> Danish Ali Sunny,<sup>2</sup> Abdullah Alqahtani,<sup>3</sup> Shtwai Alsubai,<sup>3</sup> Adel Binbusayyis,<sup>3</sup> and Muhammad Muzammal,<sup>4</sup>*<br/>
 <sub>1 Department of Computer Science, Bahria University, Islamabad 44000, Pakistan</sub><br/>
